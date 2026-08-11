@@ -88,6 +88,15 @@
   }
   .nav-back:active{opacity:0.4;}
   .nav-back svg{width:11px;height:18px;}
+  .nav-profile{
+    position:absolute; right:6px; top:0; bottom:0; margin:auto 0;
+    width:30px;height:30px;border-radius:50%;
+    background:rgba(46,169,232,0.12);
+    border:none;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .nav-profile:active{opacity:0.5;}
+  .nav-profile svg{width:18px;height:18px;}
   .progress-track{height:2.5px;background:var(--separator);position:relative;overflow:hidden;}
   .progress-fill{height:100%;background:var(--accent);transition:width .35s cubic-bezier(.4,0,.2,1);}
 
@@ -223,7 +232,7 @@
   .btn-primary{background:var(--accent);color:#fff;}
   .btn-primary:disabled{background:var(--tertiary);}
   .btn-secondary{background:rgba(120,120,128,0.12);color:var(--accent);}
-  .btn-plain{background:none;color:var(--accent);padding:8px;}
+  .btn-plain{background:none;color:var(--secondary);padding:6px;font-size:13.5px;font-weight:500;}
 
   .error-banner{
     background:#FFEBEA;color:var(--danger);font-size:13px;
@@ -250,6 +259,9 @@
         Назад
       </button>
       <div class="nav-title" id="navTitle">Заказ-наряд</div>
+      <button class="nav-profile" id="navProfile" style="display:none;">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8.2" r="3.4" stroke="#2EA9E8" stroke-width="1.8"/><path d="M4.8 19c1.2-3.4 4-5.2 7.2-5.2s6 1.8 7.2 5.2" stroke="#2EA9E8" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
     </div>
     <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
   </div>
@@ -273,10 +285,34 @@ const EQUIP_SUBTYPES = {
   "РУСН 6–20 кВ": ["КРУ", "КСО", "RME-6"],
 };
 
+/* ===================== ПРОФИЛЬ (localStorage) ===================== */
+const PROFILE_KEY = "eo_profile_v1";
+
+function loadProfile(){
+  try {
+    const raw = localStorage.getItem(PROFILE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch(e){ return null; }
+}
+function saveProfile(p){
+  try { localStorage.setItem(PROFILE_KEY, JSON.stringify(p)); } catch(e){}
+}
+function abbreviateFio(full){
+  const parts = (full || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return parts[0];
+  const surname = parts[0];
+  const initials = parts.slice(1, 3).map(p => p[0].toUpperCase() + ".").join("");
+  return `${surname} ${initials}`;
+}
+
+let profile = loadProfile();
+let previousStep = "date";
+
 /* ===================== СОСТОЯНИЕ ===================== */
-let step = "fio";
+let step = profile ? "date" : "register";
 let data = {
-  fio:"", surname:"", date: todayStr(), order:"",
+  date: todayStr(), order:"",
   equipType:"", equipSubtype:"", equipManual:"", operation:"", time:"",
 };
 let opsCount = 0;
@@ -291,22 +327,37 @@ const mainArea = document.getElementById("mainArea");
 const footerArea = document.getElementById("footerArea");
 const navTitle = document.getElementById("navTitle");
 const navBack = document.getElementById("navBack");
+const navProfile = document.getElementById("navProfile");
 const progressFill = document.getElementById("progressFill");
 
-const PROGRESS_STEPS = ["surname","date","order","equipType","operation","time"];
-const BACK_MAP = { surname:"fio", date:"surname", order:"date", equipType:"order",
+navProfile.onclick = () => { previousStep = step; goTo("profile"); };
+
+const PROGRESS_STEPS = ["date","order","equipType","operation","time"];
+const BACK_MAP = { order:"date", equipType:"order",
   equipSubtype:"equipType", operation:"equipSubtype", time:"operation", confirm:"time" };
 
 function progressIndex(){
   if (step === "equipSubtype") return PROGRESS_STEPS.indexOf("equipType");
-  if (step === "confirm" || step === "done") return PROGRESS_STEPS.length - 1;
+  if (step === "confirm") return PROGRESS_STEPS.length - 1;
   return PROGRESS_STEPS.indexOf(step);
 }
 
 function setNav(title){
-  if (step === "fio" || step === "done"){
-    navTitle.classList.remove("show");
-    navBack.style.display = "none";
+  if (step === "register"){
+    navTitle.classList.remove("show"); navBack.style.display = "none";
+    navProfile.style.display = "none"; progressFill.style.width = "0%";
+    return;
+  }
+  if (step === "done"){
+    navTitle.classList.remove("show"); navBack.style.display = "none";
+    navProfile.style.display = "flex"; progressFill.style.width = "0%";
+    return;
+  }
+  if (step === "profile"){
+    navTitle.textContent = "Профиль"; navTitle.classList.add("show");
+    navBack.style.display = "flex";
+    navBack.onclick = () => goTo(previousStep || "done");
+    navProfile.style.display = "none";
     progressFill.style.width = "0%";
     return;
   }
@@ -315,6 +366,7 @@ function setNav(title){
   const target = BACK_MAP[step];
   navBack.style.display = target ? "flex" : "none";
   navBack.onclick = () => target && goTo(target);
+  navProfile.style.display = "flex";
   const idx = progressIndex();
   progressFill.style.width = ((idx+1)/PROGRESS_STEPS.length*100) + "%";
 }
@@ -329,8 +381,8 @@ function render(){
   wrap.className = "step-wrap";
   mainArea.appendChild(wrap);
 
-  if (step === "fio") return renderFio(wrap);
-  if (step === "surname") return renderSurname(wrap);
+  if (step === "register") return renderRegister(wrap);
+  if (step === "profile") return renderProfile(wrap);
   if (step === "date") return renderDate(wrap);
   if (step === "order") return renderOrder(wrap);
   if (step === "equipType") return renderEquipType(wrap);
@@ -395,39 +447,61 @@ function secondaryBtn(label, onClick){
   return btn;
 }
 
-/* ---- ФИО ---- */
-function renderFio(wrap){
+/* ---- Регистрация (один раз) ---- */
+function renderRegister(wrap){
   setNav("");
-  navTitle.classList.remove("show");
-  navBack.style.display = "none";
-  progressFill.style.width = "0%";
   brandRow(wrap);
-  largeTitle(wrap, "Заказ-наряд", "Укажите, кто заполняет — сохранится для всей сессии");
-  const input = document.createElement("input");
-  input.type = "text"; input.placeholder = "Иванов Иван Иванович"; input.value = data.fio;
-  fieldCard(wrap, "ФИО", input);
-  primaryBtn("Начать", () => {
-    data.fio = input.value.trim();
-    if (!data.fio) { input.focus(); return; }
-    goTo("surname");
-  });
-  setTimeout(()=>input.focus(), 250);
-}
-
-/* ---- Фамилия ---- */
-function renderSurname(wrap){
-  setNav("Фамилия");
-  brandRow(wrap);
-  largeTitle(wrap, "Фамилия");
-  const input = document.createElement("input");
-  input.type = "text"; input.placeholder = "Иванов"; input.value = data.surname;
-  fieldCard(wrap, "Фамилия исполнителя", input);
-  primaryBtn("Далее", () => {
-    data.surname = input.value.trim();
-    if (!data.surname) { input.focus(); return; }
+  largeTitle(wrap, "Регистрация", "Укажите ФИО и должность один раз — дальше они будут подставляться автоматически");
+  const fioInput = document.createElement("input");
+  fioInput.type = "text"; fioInput.placeholder = "Муртазин Рамиль Нурмохаметович";
+  fieldCard(wrap, "ФИО", fioInput);
+  const posInput = document.createElement("input");
+  posInput.type = "text"; posInput.placeholder = "Электромонтёр";
+  fieldCard(wrap, "Должность", posInput);
+  const hint = document.createElement("div");
+  hint.className = "hint";
+  hint.textContent = "Укажите минимум фамилию и имя — отчество не обязательно. В таблицу будет записываться сокращённая форма, например: Муртазин Р.Н.";
+  wrap.appendChild(hint);
+  primaryBtn("Продолжить", () => {
+    const fio = fioInput.value.trim();
+    const position = posInput.value.trim();
+    const words = fio.split(/\s+/).filter(Boolean);
+    if (words.length < 2) { fioInput.focus(); return; }
+    if (!position) { posInput.focus(); return; }
+    profile = { fio, position };
+    saveProfile(profile);
     goTo("date");
   });
-  setTimeout(()=>input.focus(), 250);
+  setTimeout(()=>fioInput.focus(), 250);
+}
+
+/* ---- Профиль (просмотр/редактирование) ---- */
+function renderProfile(wrap){
+  setNav("Профиль");
+  largeTitle(wrap, "Профиль");
+  const fioInput = document.createElement("input");
+  fioInput.type = "text"; fioInput.value = profile.fio;
+  fieldCard(wrap, "ФИО", fioInput);
+  const posInput = document.createElement("input");
+  posInput.type = "text"; posInput.value = profile.position;
+  fieldCard(wrap, "Должность", posInput);
+  const hint = document.createElement("div");
+  hint.className = "hint";
+  hint.textContent = `В таблицу записывается сокращённо: ${abbreviateFio(profile.fio)}`;
+  wrap.appendChild(hint);
+  fioInput.addEventListener("input", () => {
+    hint.textContent = `В таблицу записывается сокращённо: ${abbreviateFio(fioInput.value) || "—"}`;
+  });
+  primaryBtn("Сохранить", () => {
+    const fio = fioInput.value.trim();
+    const position = posInput.value.trim();
+    const words = fio.split(/\s+/).filter(Boolean);
+    if (words.length < 2) { fioInput.focus(); return; }
+    if (!position) { posInput.focus(); return; }
+    profile = { fio, position };
+    saveProfile(profile);
+    goTo(previousStep || "done");
+  });
 }
 
 /* ---- Дата ---- */
@@ -554,7 +628,7 @@ function renderConfirm(wrap){
   largeTitle(wrap, "Проверьте данные", "Перед отправкой в таблицу");
   const equipment = data.equipType === "Прочие" ? data.equipManual : data.equipSubtype;
   const card = document.createElement("div"); card.className = "card";
-  [["Фамилия", data.surname],["Дата", data.date],["Заказ", data.order],
+  [["Исполнитель", abbreviateFio(profile.fio)],["Дата", data.date],["Заказ", data.order],
    ["Оборудование", equipment],["Операция", data.operation],["Время", data.time]]
   .forEach(([k,v]) => {
     const row = document.createElement("div"); row.className = "row review-row";
@@ -581,7 +655,7 @@ async function submitRow(btn){
   btn.innerHTML = '<span class="spinner"></span>Сохраняем…';
 
   const equipment = data.equipType === "Прочие" ? data.equipManual : data.equipSubtype;
-  const payload = { fio:data.fio, surname:data.surname, date:data.date, order:data.order,
+  const payload = { fio:profile.fio, surname:abbreviateFio(profile.fio), date:data.date, order:data.order,
     equipment, operation:data.operation, time:data.time };
 
   try {
@@ -611,15 +685,21 @@ function renderDone(wrap){
   `;
   wrap.appendChild(msg);
 
+  const profileLink = document.createElement("button");
+  profileLink.className = "btn btn-plain";
+  profileLink.textContent = `Профиль: ${abbreviateFio(profile.fio)} · изменить`;
+  profileLink.onclick = () => { previousStep = "done"; goTo("profile"); };
+  wrap.appendChild(profileLink);
+
   secondaryBtn("Ещё операция", () => {
     data.order=""; data.equipType=""; data.equipSubtype=""; data.equipManual="";
     data.operation=""; data.time="";
     goTo("order");
   });
   primaryBtn("Завершить", () => {
-    data = { fio:"", surname:"", date: todayStr(), order:"", equipType:"", equipSubtype:"", equipManual:"", operation:"", time:"" };
+    data = { date: todayStr(), order:"", equipType:"", equipSubtype:"", equipManual:"", operation:"", time:"" };
     opsCount = 0;
-    goTo("fio");
+    goTo("date");
   });
 }
 
