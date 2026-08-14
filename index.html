@@ -97,6 +97,14 @@
   }
   .nav-profile:active{opacity:0.5;}
   .nav-profile svg{width:18px;height:18px;}
+  #pendingBadge{
+    position:absolute; top:-3px; right:-3px;
+    min-width:16px; height:16px; padding:0 3px;
+    border-radius:8px; background:#FF9500; color:#fff;
+    font-size:9.5px; font-weight:700; line-height:16px; text-align:center;
+    align-items:center; justify-content:center;
+    border:1.5px solid var(--bg);
+  }
   .progress-track{height:2.5px;background:var(--separator);position:relative;overflow:hidden;}
   .progress-fill{height:100%;background:var(--accent);transition:width .35s cubic-bezier(.4,0,.2,1);}
 
@@ -261,6 +269,7 @@
       <div class="nav-title" id="navTitle">Заказ-наряд</div>
       <button class="nav-profile" id="navProfile" style="display:none;">
         <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8.2" r="3.4" stroke="#2EA9E8" stroke-width="1.8"/><path d="M4.8 19c1.2-3.4 4-5.2 7.2-5.2s6 1.8 7.2 5.2" stroke="#2EA9E8" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span id="pendingBadge" style="display:none;"></span>
       </button>
     </div>
     <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
@@ -274,7 +283,7 @@
 <script>
 /* ===================== НАСТРОЙКИ ===================== */
 const CONFIG = {
-  API_URL: "https://script.google.com/macros/s/AKfycbz_VZXQKKplL2ewvBk1xk4otfVcCMDkZFvW460Ao3_ICEf--cnQM78yV6nW7mv2Zg2Lmg/exec",
+  API_URL: "https://script.google.com/macros/s/AKfycbwxX6AjcLiPVp4BpWaOUjRN-637crqp3MvuwY8k7jv3ageCy3BGbWi3m_ED7UlBlWhBLw/exec",
 };
 
 /* ===================== СПРАВОЧНИКИ ===================== */
@@ -308,12 +317,18 @@ function abbreviateFio(full){
 
 let profile = loadProfile();
 let previousStep = "date";
+let lastWasQueued = false;
+function makeRequestId(){
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return "id-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+}
 
 /* ===================== СОСТОЯНИЕ ===================== */
 let step = profile ? "date" : "register";
 let data = {
   date: todayStr(), order:"",
   equipType:"", equipSubtype:"", equipManual:"", operation:"", time:"",
+  requestId: null,
 };
 let opsCount = 0;
 
@@ -639,11 +654,64 @@ function renderConfirm(wrap){
 
   const errorBanner = document.createElement("div");
   errorBanner.className = "error-banner"; errorBanner.id = "errorBanner";
-  errorBanner.textContent = "Не удалось сохранить. Проверьте соединение и попробуйте снова.";
+  errorBanner.textContent = "Не удалось сохранить после нескольких попыток. Похоже, проблема не в связи — проверьте, что таблица открыта, и попробуйте ещё раз.";
   wrap.appendChild(errorBanner);
 
   const btn = primaryBtn("Подтвердить", () => submitRow(btn));
 }
+
+async function attemptSend(payload, timeoutMs){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 8000);
+  try {
+    const res = await fetch(CONFIG.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error("bad status " + res.status);
+    return true;
+  } catch (e) {
+    clearTimeout(timer);
+    throw e;
+  }
+}
+
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+/* ---------- Офлайн-очередь (на случай, если связи нет совсем) ---------- */
+const QUEUE_KEY = "eo_pending_queue_v1";
+function loadQueue(){ try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]"); } catch(e){ return []; } }
+function saveQueue(arr){ try { localStorage.setItem(QUEUE_KEY, JSON.stringify(arr)); } catch(e){} }
+function enqueuePending(payload){
+  const q = loadQueue();
+  q.push({ payload, addedAt: Date.now() });
+  saveQueue(q);
+  updatePendingBadge();
+}
+async function flushQueue(){
+  let q = loadQueue();
+  if (!q.length) { updatePendingBadge(); return; }
+  const remaining = [];
+  for (const item of q){
+    try { await attemptSend(item.payload, 8000); }
+    catch(e){ remaining.push(item); }
+  }
+  saveQueue(remaining);
+  updatePendingBadge();
+}
+function updatePendingBadge(){
+  const badge = document.getElementById("pendingBadge");
+  if (!badge) return;
+  const n = loadQueue().length;
+  if (n > 0){ badge.style.display = "flex"; badge.textContent = n > 9 ? "9+" : String(n); }
+  else { badge.style.display = "none"; }
+}
+window.addEventListener("online", flushQueue);
+window.addEventListener("load", flushQueue);
+setInterval(() => { if (navigator.onLine) flushQueue(); }, 25000);
 
 function escapeHtml(str){ const d=document.createElement("div"); d.textContent=str; return d.innerHTML; }
 
@@ -652,22 +720,38 @@ async function submitRow(btn){
   errorBanner.classList.remove("show");
   const originalLabel = btn.textContent;
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Сохраняем…';
 
+  if (!data.requestId) data.requestId = makeRequestId();
   const equipment = data.equipType === "Прочие" ? data.equipManual : data.equipSubtype;
-  const payload = { fio:profile.fio, surname:abbreviateFio(profile.fio), date:data.date, order:data.order,
-    equipment, operation:data.operation, time:data.time };
+  const payload = {
+    requestId: data.requestId,
+    fio:profile.fio, surname:abbreviateFio(profile.fio), date:data.date, order:data.order,
+    equipment, operation:data.operation, time:data.time,
+  };
 
-  try {
-    const res = await fetch(CONFIG.API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error("bad status");
+  // Несколько незаметных попыток с нарастающей паузой — типично гасит "моргание" сети.
+  const DELAYS = [0, 1200, 2500, 4500];
+  for (let i = 0; i < DELAYS.length; i++){
+    if (DELAYS[i] > 0){ await sleep(DELAYS[i]); }
+    btn.innerHTML = '<span class="spinner"></span>Сохраняем…';
+    try {
+      await attemptSend(payload, 8000);
+      data.requestId = null;
+      opsCount++;
+      goTo("done");
+      return;
+    } catch (e) { /* пробуем ещё раз */ }
+  }
+
+  // Все попытки не удались.
+  if (!navigator.onLine) {
+    // Связи нет совсем — не блокируем сотрудника, данные подождут на телефоне.
+    enqueuePending(payload);
+    data.requestId = null;
     opsCount++;
+    lastWasQueued = true;
     goTo("done");
-  } catch (e) {
+  } else {
     errorBanner.classList.add("show");
     btn.disabled = false; btn.textContent = originalLabel;
   }
@@ -678,7 +762,12 @@ function renderDone(wrap){
   setNav("");
   brandRow(wrap);
   const msg = document.createElement("div"); msg.className = "center-msg";
-  msg.innerHTML = `
+  const queued = lastWasQueued; lastWasQueued = false;
+  msg.innerHTML = queued ? `
+    <div class="check-badge" style="background:#8E8E93;"><svg viewBox="0 0 24 24" fill="none"><path d="M12 7v5l3.2 3.2" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="8.4" stroke="#fff" stroke-width="2"/></svg></div>
+    <h2>Сохранено на телефоне</h2>
+    <p>Связи сейчас нет — заказ ${escapeHtml(data.order)} отправится в таблицу автоматически, как только интернет появится. Можно продолжать работу.</p>
+  ` : `
     <div class="check-badge"><svg viewBox="0 0 24 24" fill="none"><path d="M5 12.5L10 17.5L19 7" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
     <h2>Операция добавлена</h2>
     <p>Заказ ${escapeHtml(data.order)} сохранён в таблице. Есть ещё операции по этому заказ-наряду?</p>
@@ -693,11 +782,11 @@ function renderDone(wrap){
 
   secondaryBtn("Ещё операция", () => {
     data.order=""; data.equipType=""; data.equipSubtype=""; data.equipManual="";
-    data.operation=""; data.time="";
+    data.operation=""; data.time=""; data.requestId=null;
     goTo("order");
   });
   primaryBtn("Завершить", () => {
-    data = { date: todayStr(), order:"", equipType:"", equipSubtype:"", equipManual:"", operation:"", time:"" };
+    data = { date: todayStr(), order:"", equipType:"", equipSubtype:"", equipManual:"", operation:"", time:"", requestId:null };
     opsCount = 0;
     goTo("date");
   });
